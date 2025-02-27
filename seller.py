@@ -10,21 +10,22 @@ import requests
 
 logger = logging.getLogger(__file__)
 
-
-def get_product_list(last_id, client_id, seller_token):
+def get_product_list(last_id: str, client_id: str, seller_token: str) -> dict:
     """Получает список товаров магазина Ozon.
 
     Args:
-        last_id (str): Последний идентификатор товара.
+        last_id (str): Последний ID, с которого начинать загрузку.
         client_id (str): Идентификатор клиента Ozon.
-        seller_token (str): Токен продавца Ozon.
+        seller_token (str): Токен продавца.
 
     Returns:
-        dict: Результат запроса со списком товаров.
+        dict: Список товаров.
+    
+    Raises:
+        requests.exceptions.RequestException: В случае ошибки запроса.
 
     Example:
         >>> get_product_list("", "12345", "token")
-        {'items': [...], 'total': 100, 'last_id': 'abc123'}
     """
     url = "https://api-seller.ozon.ru/v2/product/list"
     headers = {"Client-Id": client_id, "Api-Key": seller_token}
@@ -33,20 +34,18 @@ def get_product_list(last_id, client_id, seller_token):
     response.raise_for_status()
     return response.json().get("result")
 
-
-def get_offer_ids(client_id, seller_token):
+def get_offer_ids(client_id: str, seller_token: str) -> list:
     """Получает список артикулов товаров магазина Ozon.
 
     Args:
         client_id (str): Идентификатор клиента Ozon.
-        seller_token (str): Токен продавца Ozon.
+        seller_token (str): Токен продавца.
 
     Returns:
-        list: Список offer_id товаров.
+        list: Список артикулов (offer_id).
 
     Example:
         >>> get_offer_ids("12345", "token")
-        ['offer1', 'offer2', 'offer3']
     """
     last_id = ""
     product_list = []
@@ -59,17 +58,16 @@ def get_offer_ids(client_id, seller_token):
             break
     return [product.get("offer_id") for product in product_list]
 
-
-def update_price(prices, client_id, seller_token):
-    """Обновляет цены товаров.
+def update_price(prices: list, client_id: str, seller_token: str) -> dict:
+    """Обновляет цены товаров на Ozon.
 
     Args:
-        prices (list): Список словарей с информацией о цене.
+        prices (list): Список цен.
         client_id (str): Идентификатор клиента Ozon.
-        seller_token (str): Токен продавца Ozon.
+        seller_token (str): Токен продавца.
 
     Returns:
-        dict: Ответ от API Ozon.
+        dict: Ответ API Ozon.
     """
     url = "https://api-seller.ozon.ru/v1/product/import/prices"
     headers = {"Client-Id": client_id, "Api-Key": seller_token}
@@ -77,72 +75,55 @@ def update_price(prices, client_id, seller_token):
     response.raise_for_status()
     return response.json()
 
-
-def update_stocks(stocks, client_id, seller_token):
-    """Обновляет остатки товаров.
-
-    Args:
-        stocks (list): Список словарей с остатками.
-        client_id (str): Идентификатор клиента Ozon.
-        seller_token (str): Токен продавца Ozon.
+def download_stock() -> list:
+    """Скачивает и обрабатывает файл остатков с сайта Casio.
 
     Returns:
-        dict: Ответ от API Ozon.
+        list: Список остатков товаров.
     """
-    url = "https://api-seller.ozon.ru/v1/product/import/stocks"
-    headers = {"Client-Id": client_id, "Api-Key": seller_token}
-    response = requests.post(url, json={"stocks": stocks}, headers=headers)
+    casio_url = "https://timeworld.ru/upload/files/ostatki.zip"
+    response = requests.get(casio_url)
     response.raise_for_status()
-    return response.json()
-
+    with zipfile.ZipFile(io.BytesIO(response.content)) as archive:
+        archive.extractall(".")
+    excel_file = "ostatki.xls"
+    watch_remnants = pd.read_excel(excel_file, header=17).to_dict(orient="records")
+    os.remove(excel_file)
+    return watch_remnants
 
 def price_conversion(price: str) -> str:
-    """Преобразует строку цены в числовую строку без лишних символов.
+    """Преобразует цену в числовой формат.
 
     Args:
-        price (str): Строка цены (например, "5'990.00 руб.").
+        price (str): Цена в строковом формате.
 
     Returns:
-        str: Числовая строка (например, "5990").
+        str: Числовая цена без лишних символов.
+
+    Example:
+        >>> price_conversion("5'990.00 руб.")
+        '5990'
     """
     return re.sub("[^0-9]", "", price.split(".")[0])
 
-
-def divide(lst, n):
-    """Разделяет список на части по n элементов.
-
-    Args:
-        lst (list): Исходный список.
-        n (int): Размер подсписков.
-
-    Yields:
-        list: Подсписки по n элементов.
-    """
-    for i in range(0, len(lst), n):
-        yield lst[i: i + n]
-
-
 def main():
-    """Главная функция для обновления цен и остатков на Ozon."""
+    """Основная функция запуска обновления остатков и цен на Ozon."""
     env = Env()
     seller_token = env.str("SELLER_TOKEN")
     client_id = env.str("CLIENT_ID")
     try:
         offer_ids = get_offer_ids(client_id, seller_token)
         watch_remnants = download_stock()
-        stocks = create_stocks(watch_remnants, offer_ids)
-        for some_stock in divide(stocks, 100):
-            update_stocks(some_stock, client_id, seller_token)
-        prices = create_prices(watch_remnants, offer_ids)
+        prices = [{
+            "auto_action_enabled": "UNKNOWN", "currency_code": "RUB", "offer_id": str(watch["Код"]),
+            "old_price": "0", "price": price_conversion(watch["Цена"])
+        } for watch in watch_remnants if str(watch["Код"]) in offer_ids]
         for some_price in divide(prices, 900):
             update_price(some_price, client_id, seller_token)
-    except requests.exceptions.ReadTimeout:
-        print("Превышено время ожидания...")
-    except requests.exceptions.ConnectionError as error:
-        print(error, "Ошибка соединения")
+    except requests.exceptions.RequestException as error:
+        print(f"Ошибка запроса: {error}")
     except Exception as error:
-        print(error, "ERROR_2")
-
+        print(f"Произошла ошибка: {error}")
 
 if __name__ == "__main__":
     main()
